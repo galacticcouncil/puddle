@@ -1,19 +1,20 @@
 {
-  "name": "smoldot",
-  "version": "2.0.40",
-  "description": "Light client that connects to Polkadot and Substrate-based blockchains",
+  "name": "@galacticcouncil/puddle",
+  "version": "1.0.0",
+  "description": "Light client that connects to Polkadot and Substrate-based blockchains with Ethereum JSON-RPC support",
   "contributors": [
     "Parity Technologies <admin@parity.io>",
-    "Pierre Krieger <pierre.krieger1708@gmail.com>"
+    "Pierre Krieger <pierre.krieger1708@gmail.com>",
+    "Galactic Council <https://github.com/galacticcouncil>"
   ],
   "license": "GPL-3.0-or-later WITH Classpath-exception-2.0",
-  "homepage": "https://github.com/smol-dot/smoldot",
+  "homepage": "https://github.com/galacticcouncil/puddle",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/smol-dot/smoldot.git"
+    "url": "git+https://github.com/galacticcouncil/puddle.git"
   },
   "bugs": {
-    "url": "https://github.com/smol-dot/smoldot/issues"
+    "url": "https://github.com/galacticcouncil/puddle/issues"
   },
   "files": [
     "dist"
