@@ -462,6 +462,19 @@ define_methods! {
     /// Returns, as an opaque string, the version of the client serving these JSON-RPC requests.
     system_version() -> Cow<'a, str>,
 
+    // Ethereum JSON-RPC methods for EVM-compatible chains (Frontier).
+    eth_blockNumber() -> EthQuantity,
+    eth_call(transaction: EthCallObject, block: Option<EthBlockParameter>) -> HexString,
+    eth_chainId() -> EthQuantity,
+    eth_estimateGas(transaction: EthCallObject, block: Option<EthBlockParameter>) -> EthQuantity,
+    eth_gasPrice() -> EthQuantity,
+    eth_getBalance(address: EthAddress, block: Option<EthBlockParameter>) -> EthQuantity,
+    eth_getCode(address: EthAddress, block: Option<EthBlockParameter>) -> HexString,
+    eth_getStorageAt(address: EthAddress, position: EthQuantity, block: Option<EthBlockParameter>) -> HexString,
+    eth_getTransactionCount(address: EthAddress, block: Option<EthBlockParameter>) -> EthQuantity,
+    net_version() -> Cow<'a, str>,
+    web3_clientVersion() -> Cow<'a, str>,
+
     // The functions below are experimental and are defined in the document https://github.com/paritytech/json-rpc-interface-spec/
     chainHead_v1_body(
         #[rename = "followSubscription"] follow_subscription: Cow<'a, str>,
@@ -607,6 +620,214 @@ impl<'a> serde::Deserialize<'a> for HashHexString {
         out.copy_from_slice(&bytes);
         Ok(HashHexString(out))
     }
+}
+
+/// An Ethereum address (20 bytes), serialized as `"0x"` followed by 40 hex characters.
+#[derive(Debug, Clone)]
+pub struct EthAddress(pub [u8; 20]);
+
+impl<'a> serde::Deserialize<'a> for EthAddress {
+    fn deserialize<D>(deserializer: D) -> Result<EthAddress, D::Error>
+    where
+        D: serde::Deserializer<'a>,
+    {
+        let string = String::deserialize(deserializer)?;
+
+        if !string.starts_with("0x") {
+            return Err(serde::de::Error::custom(
+                "Ethereum address doesn't start with 0x",
+            ));
+        }
+
+        let bytes = hex::decode(&string[2..]).map_err(serde::de::Error::custom)?;
+        if bytes.len() != 20 {
+            return Err(serde::de::Error::custom(format!(
+                "Ethereum address has wrong length: expected 20 bytes, got {}",
+                bytes.len()
+            )));
+        }
+
+        let mut arr = [0u8; 20];
+        arr.copy_from_slice(&bytes);
+        Ok(EthAddress(arr))
+    }
+}
+
+impl serde::Serialize for EthAddress {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        format!("0x{}", hex::encode(self.0)).serialize(serializer)
+    }
+}
+
+/// An Ethereum quantity (U256), stored as 32 bytes in little-endian.
+/// Serialized as `"0x"` followed by minimal hex (big-endian), e.g. `"0x0"`, `"0x1"`, `"0x400"`.
+#[derive(Debug, Clone)]
+pub struct EthQuantity(pub [u8; 32]);
+
+impl EthQuantity {
+    /// Creates an `EthQuantity` from a `u64` value.
+    pub fn from_u64(v: u64) -> Self {
+        let mut bytes = [0u8; 32];
+        bytes[..8].copy_from_slice(&v.to_le_bytes());
+        EthQuantity(bytes)
+    }
+
+    /// Creates an `EthQuantity` from little-endian bytes.
+    pub fn from_le_bytes(b: [u8; 32]) -> Self {
+        EthQuantity(b)
+    }
+}
+
+impl serde::Serialize for EthQuantity {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        // Convert LE to BE and strip leading zeros.
+        let mut be_bytes = self.0;
+        be_bytes.reverse();
+
+        // Find the first non-zero byte.
+        let first_nonzero = be_bytes.iter().position(|&b| b != 0);
+        let hex_str = match first_nonzero {
+            Some(pos) => {
+                let hex = hex::encode(&be_bytes[pos..]);
+                // Strip the leading zero if any (hex::encode always produces pairs).
+                let hex = hex.trim_start_matches('0');
+                if hex.is_empty() {
+                    "0x0".to_string()
+                } else {
+                    format!("0x{hex}")
+                }
+            }
+            None => "0x0".to_string(),
+        };
+        hex_str.serialize(serializer)
+    }
+}
+
+impl<'a> serde::Deserialize<'a> for EthQuantity {
+    fn deserialize<D>(deserializer: D) -> Result<EthQuantity, D::Error>
+    where
+        D: serde::Deserializer<'a>,
+    {
+        let string = String::deserialize(deserializer)?;
+
+        if !string.starts_with("0x") {
+            return Err(serde::de::Error::custom(
+                "Ethereum quantity doesn't start with 0x",
+            ));
+        }
+
+        let hex_digits = &string[2..];
+        if hex_digits.is_empty() {
+            return Err(serde::de::Error::custom(
+                "Ethereum quantity has no digits after 0x",
+            ));
+        }
+
+        // Pad to even length for hex decoding.
+        let padded = if hex_digits.len() % 2 != 0 {
+            format!("0{hex_digits}")
+        } else {
+            hex_digits.to_string()
+        };
+
+        let be_bytes = hex::decode(&padded).map_err(serde::de::Error::custom)?;
+        if be_bytes.len() > 32 {
+            return Err(serde::de::Error::custom(
+                "Ethereum quantity exceeds U256 range",
+            ));
+        }
+
+        // Convert BE to LE 32-byte array.
+        let mut le = [0u8; 32];
+        for (i, &b) in be_bytes.iter().rev().enumerate() {
+            le[i] = b;
+        }
+        Ok(EthQuantity(le))
+    }
+}
+
+/// An Ethereum block parameter, used for specifying which block to query.
+#[derive(Debug, Clone)]
+pub enum EthBlockParameter {
+    /// The latest block.
+    Latest,
+    /// The earliest/genesis block.
+    Earliest,
+    /// The pending block (treated as latest).
+    Pending,
+    /// A specific block number.
+    Number(u64),
+}
+
+impl<'a> serde::Deserialize<'a> for EthBlockParameter {
+    fn deserialize<D>(deserializer: D) -> Result<EthBlockParameter, D::Error>
+    where
+        D: serde::Deserializer<'a>,
+    {
+        let string = String::deserialize(deserializer)?;
+
+        match string.as_str() {
+            "latest" => Ok(EthBlockParameter::Latest),
+            "earliest" => Ok(EthBlockParameter::Earliest),
+            "pending" => Ok(EthBlockParameter::Pending),
+            s if s.starts_with("0x") => {
+                let hex_digits = &s[2..];
+                let number = u64::from_str_radix(hex_digits, 16)
+                    .map_err(serde::de::Error::custom)?;
+                Ok(EthBlockParameter::Number(number))
+            }
+            _ => Err(serde::de::Error::custom(format!(
+                "Invalid block parameter: {string}"
+            ))),
+        }
+    }
+}
+
+impl serde::Serialize for EthBlockParameter {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self {
+            EthBlockParameter::Latest => "latest".serialize(serializer),
+            EthBlockParameter::Earliest => "earliest".serialize(serializer),
+            EthBlockParameter::Pending => "pending".serialize(serializer),
+            EthBlockParameter::Number(n) => format!("0x{n:x}").serialize(serializer),
+        }
+    }
+}
+
+/// An Ethereum call object, as passed to `eth_call` and `eth_estimateGas`.
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct EthCallObject {
+    /// The sender address.
+    pub from: Option<EthAddress>,
+    /// The destination address.
+    pub to: Option<EthAddress>,
+    /// Gas limit.
+    pub gas: Option<EthQuantity>,
+    /// Gas price (legacy).
+    #[serde(rename = "gasPrice")]
+    pub gas_price: Option<EthQuantity>,
+    /// Max fee per gas (EIP-1559).
+    #[serde(rename = "maxFeePerGas")]
+    pub max_fee_per_gas: Option<EthQuantity>,
+    /// Max priority fee per gas (EIP-1559).
+    #[serde(rename = "maxPriorityFeePerGas")]
+    pub max_priority_fee_per_gas: Option<EthQuantity>,
+    /// Value to transfer.
+    pub value: Option<EthQuantity>,
+    /// Input data.
+    #[serde(alias = "input")]
+    pub data: Option<HexString>,
+    /// Nonce.
+    pub nonce: Option<EthQuantity>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -1294,5 +1515,491 @@ mod tests {
                 }
             })
         ));
+    }
+
+    // =========================================================================
+    // Ethereum JSON-RPC type tests (Hydration parachain compatibility)
+    //
+    // These tests verify serde roundtrips and JSON-RPC parsing for the
+    // Ethereum types, using realistic Hydration parachain values.
+    // Hydration EVM chain ID: 222222 (0x3658E)
+    // =========================================================================
+
+    #[test]
+    fn eth_address_deserialize() {
+        let addr: super::EthAddress =
+            serde_json::from_str(r#""0x0000000000000000000000000000000000000000""#).unwrap();
+        assert_eq!(addr.0, [0u8; 20]);
+    }
+
+    #[test]
+    fn eth_address_deserialize_realistic() {
+        // A realistic Hydration EVM address
+        let addr: super::EthAddress =
+            serde_json::from_str(r#""0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045""#).unwrap();
+        assert_eq!(addr.0[0], 0xd8);
+        assert_eq!(addr.0[1], 0xdA);
+        assert_eq!(addr.0[19], 0x45);
+    }
+
+    #[test]
+    fn eth_address_serialize_roundtrip() {
+        let addr = super::EthAddress([0xAB; 20]);
+        let json = serde_json::to_string(&addr).unwrap();
+        assert_eq!(json, r#""0xabababababababababababababababababababab""#);
+        let parsed: super::EthAddress = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.0, addr.0);
+    }
+
+    #[test]
+    fn eth_address_wrong_length() {
+        let err = serde_json::from_str::<super::EthAddress>(r#""0xabcd""#);
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn eth_address_missing_prefix() {
+        let err =
+            serde_json::from_str::<super::EthAddress>(r#""abababababababababababababababababababababab""#);
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn eth_quantity_zero() {
+        let q = super::EthQuantity::from_u64(0);
+        let json = serde_json::to_string(&q).unwrap();
+        assert_eq!(json, r#""0x0""#);
+    }
+
+    #[test]
+    fn eth_quantity_one() {
+        let q = super::EthQuantity::from_u64(1);
+        let json = serde_json::to_string(&q).unwrap();
+        assert_eq!(json, r#""0x1""#);
+    }
+
+    #[test]
+    fn eth_quantity_hydration_chain_id() {
+        // Hydration chain ID = 222222 = 0x3658E
+        let q = super::EthQuantity::from_u64(222222);
+        let json = serde_json::to_string(&q).unwrap();
+        assert_eq!(json, r#""0x3640e""#);
+    }
+
+    #[test]
+    fn eth_quantity_large_balance() {
+        // 10 HDX = 10 * 10^18 = 10_000_000_000_000_000_000
+        // = 0x8AC7230489E80000
+        let mut le = [0u8; 32];
+        le[..16].copy_from_slice(&10_000_000_000_000_000_000u128.to_le_bytes());
+        let q = super::EthQuantity::from_le_bytes(le);
+        let json = serde_json::to_string(&q).unwrap();
+        assert_eq!(json, r#""0x8ac7230489e80000""#);
+    }
+
+    #[test]
+    fn eth_quantity_deserialize_minimal() {
+        let q: super::EthQuantity = serde_json::from_str(r#""0x0""#).unwrap();
+        assert!(q.0.iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn eth_quantity_deserialize_hydration_chain_id() {
+        let q: super::EthQuantity = serde_json::from_str(r#""0x3640e""#).unwrap();
+        // 222222 in LE
+        let expected = 222222u64.to_le_bytes();
+        assert_eq!(&q.0[..8], &expected);
+        assert!(q.0[8..].iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn eth_quantity_roundtrip() {
+        let original: super::EthQuantity = serde_json::from_str(r#""0x3b9aca00""#).unwrap();
+        let json = serde_json::to_string(&original).unwrap();
+        assert_eq!(json, r#""0x3b9aca00""#);
+    }
+
+    #[test]
+    fn eth_quantity_exceeds_u256() {
+        // 33 bytes of hex = exceeds U256
+        let err = serde_json::from_str::<super::EthQuantity>(
+            r#""0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff""#,
+        );
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn eth_block_parameter_latest() {
+        let p: super::EthBlockParameter = serde_json::from_str(r#""latest""#).unwrap();
+        assert!(matches!(p, super::EthBlockParameter::Latest));
+    }
+
+    #[test]
+    fn eth_block_parameter_earliest() {
+        let p: super::EthBlockParameter = serde_json::from_str(r#""earliest""#).unwrap();
+        assert!(matches!(p, super::EthBlockParameter::Earliest));
+    }
+
+    #[test]
+    fn eth_block_parameter_pending() {
+        let p: super::EthBlockParameter = serde_json::from_str(r#""pending""#).unwrap();
+        assert!(matches!(p, super::EthBlockParameter::Pending));
+    }
+
+    #[test]
+    fn eth_block_parameter_number() {
+        let p: super::EthBlockParameter = serde_json::from_str(r#""0x1a4""#).unwrap();
+        match p {
+            super::EthBlockParameter::Number(n) => assert_eq!(n, 420),
+            _ => panic!("expected Number"),
+        }
+    }
+
+    #[test]
+    fn eth_block_parameter_serialize_roundtrip() {
+        let json = serde_json::to_string(&super::EthBlockParameter::Latest).unwrap();
+        assert_eq!(json, r#""latest""#);
+        let json = serde_json::to_string(&super::EthBlockParameter::Number(100)).unwrap();
+        assert_eq!(json, r#""0x64""#);
+    }
+
+    #[test]
+    fn eth_call_object_deserialize_minimal() {
+        // MetaMask-style minimal eth_call object
+        let obj: super::EthCallObject = serde_json::from_str(
+            r#"{"to":"0x0000000000000000000000000000000000000001","data":"0x"}"#,
+        )
+        .unwrap();
+        assert!(obj.from.is_none());
+        assert!(obj.to.is_some());
+        assert_eq!(obj.to.unwrap().0[19], 0x01);
+        assert!(obj.data.is_some());
+        assert!(obj.value.is_none());
+    }
+
+    #[test]
+    fn eth_call_object_deserialize_full() {
+        // Full eth_call object as MetaMask might send to a Hydration RPC
+        let obj: super::EthCallObject = serde_json::from_str(
+            r#"{
+                "from": "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045",
+                "to": "0x0000000000000000000000000000000000000001",
+                "gas": "0x5208",
+                "gasPrice": "0x3b9aca00",
+                "value": "0x0",
+                "data": "0xa9059cbb",
+                "nonce": "0x1"
+            }"#,
+        )
+        .unwrap();
+        assert!(obj.from.is_some());
+        assert!(obj.to.is_some());
+        assert!(obj.gas.is_some());
+        assert!(obj.gas_price.is_some());
+        assert!(obj.value.is_some());
+        assert!(obj.data.is_some());
+        assert!(obj.nonce.is_some());
+        assert!(obj.max_fee_per_gas.is_none());
+        assert!(obj.max_priority_fee_per_gas.is_none());
+    }
+
+    #[test]
+    fn eth_call_object_input_alias() {
+        // Some clients send "input" instead of "data"
+        let obj: super::EthCallObject = serde_json::from_str(
+            r#"{"to":"0x0000000000000000000000000000000000000001","input":"0xdeadbeef"}"#,
+        )
+        .unwrap();
+        assert!(obj.data.is_some());
+        assert_eq!(obj.data.unwrap().0, vec![0xde, 0xad, 0xbe, 0xef]);
+    }
+
+    #[test]
+    fn eth_call_object_eip1559() {
+        // EIP-1559 style transaction
+        let obj: super::EthCallObject = serde_json::from_str(
+            r#"{
+                "to": "0x0000000000000000000000000000000000000001",
+                "maxFeePerGas": "0x3b9aca00",
+                "maxPriorityFeePerGas": "0x59682f00"
+            }"#,
+        )
+        .unwrap();
+        assert!(obj.max_fee_per_gas.is_some());
+        assert!(obj.max_priority_fee_per_gas.is_some());
+        assert!(obj.gas_price.is_none());
+    }
+
+    // JSON-RPC method parsing tests
+
+    #[test]
+    fn parse_eth_chain_id() {
+        let (_, call) = super::parse_jsonrpc_client_to_server(
+            r#"{"jsonrpc":"2.0","id":1,"method":"eth_chainId","params":[]}"#,
+        )
+        .unwrap();
+        assert!(matches!(call, super::MethodCall::eth_chainId {}));
+    }
+
+    #[test]
+    fn parse_eth_block_number() {
+        let (_, call) = super::parse_jsonrpc_client_to_server(
+            r#"{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}"#,
+        )
+        .unwrap();
+        assert!(matches!(call, super::MethodCall::eth_blockNumber {}));
+    }
+
+    #[test]
+    fn parse_eth_get_balance_positional() {
+        let (_, call) = super::parse_jsonrpc_client_to_server(
+            r#"{"jsonrpc":"2.0","id":1,"method":"eth_getBalance","params":["0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045","latest"]}"#,
+        )
+        .unwrap();
+        match call {
+            super::MethodCall::eth_getBalance { address, block } => {
+                assert_eq!(address.0[0], 0xd8);
+                assert!(matches!(block, Some(super::EthBlockParameter::Latest)));
+            }
+            _ => panic!("expected eth_getBalance"),
+        }
+    }
+
+    #[test]
+    fn parse_eth_get_balance_no_block() {
+        // Some wallets omit the block parameter
+        let (_, call) = super::parse_jsonrpc_client_to_server(
+            r#"{"jsonrpc":"2.0","id":1,"method":"eth_getBalance","params":["0x0000000000000000000000000000000000000001"]}"#,
+        )
+        .unwrap();
+        match call {
+            super::MethodCall::eth_getBalance { block, .. } => {
+                assert!(block.is_none());
+            }
+            _ => panic!("expected eth_getBalance"),
+        }
+    }
+
+    #[test]
+    fn parse_eth_call_positional() {
+        let (_, call) = super::parse_jsonrpc_client_to_server(
+            r#"{"jsonrpc":"2.0","id":1,"method":"eth_call","params":[{"to":"0x0000000000000000000000000000000000000001","data":"0x70a08231"},"latest"]}"#,
+        )
+        .unwrap();
+        match call {
+            super::MethodCall::eth_call {
+                transaction, block, ..
+            } => {
+                assert!(transaction.to.is_some());
+                assert!(transaction.data.is_some());
+                assert!(matches!(block, Some(super::EthBlockParameter::Latest)));
+            }
+            _ => panic!("expected eth_call"),
+        }
+    }
+
+    #[test]
+    fn parse_eth_estimate_gas() {
+        let (_, call) = super::parse_jsonrpc_client_to_server(
+            r#"{"jsonrpc":"2.0","id":1,"method":"eth_estimateGas","params":[{"from":"0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045","to":"0x0000000000000000000000000000000000000001","data":"0xa9059cbb"}]}"#,
+        )
+        .unwrap();
+        match call {
+            super::MethodCall::eth_estimateGas { transaction, .. } => {
+                assert!(transaction.from.is_some());
+                assert!(transaction.to.is_some());
+            }
+            _ => panic!("expected eth_estimateGas"),
+        }
+    }
+
+    #[test]
+    fn parse_eth_gas_price() {
+        let (_, call) = super::parse_jsonrpc_client_to_server(
+            r#"{"jsonrpc":"2.0","id":1,"method":"eth_gasPrice","params":[]}"#,
+        )
+        .unwrap();
+        assert!(matches!(call, super::MethodCall::eth_gasPrice {}));
+    }
+
+    #[test]
+    fn parse_eth_get_code() {
+        let (_, call) = super::parse_jsonrpc_client_to_server(
+            r#"{"jsonrpc":"2.0","id":1,"method":"eth_getCode","params":["0x0000000000000000000000000000000000000001","latest"]}"#,
+        )
+        .unwrap();
+        match call {
+            super::MethodCall::eth_getCode { address, block } => {
+                assert_eq!(address.0[19], 0x01);
+                assert!(matches!(block, Some(super::EthBlockParameter::Latest)));
+            }
+            _ => panic!("expected eth_getCode"),
+        }
+    }
+
+    #[test]
+    fn parse_eth_get_storage_at() {
+        let (_, call) = super::parse_jsonrpc_client_to_server(
+            r#"{"jsonrpc":"2.0","id":1,"method":"eth_getStorageAt","params":["0x0000000000000000000000000000000000000001","0x0","latest"]}"#,
+        )
+        .unwrap();
+        match call {
+            super::MethodCall::eth_getStorageAt {
+                address,
+                position,
+                block,
+            } => {
+                assert_eq!(address.0[19], 0x01);
+                assert!(position.0.iter().all(|&b| b == 0));
+                assert!(matches!(block, Some(super::EthBlockParameter::Latest)));
+            }
+            _ => panic!("expected eth_getStorageAt"),
+        }
+    }
+
+    #[test]
+    fn parse_eth_get_transaction_count() {
+        let (_, call) = super::parse_jsonrpc_client_to_server(
+            r#"{"jsonrpc":"2.0","id":1,"method":"eth_getTransactionCount","params":["0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045","latest"]}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            call,
+            super::MethodCall::eth_getTransactionCount { .. }
+        ));
+    }
+
+    #[test]
+    fn parse_net_version() {
+        let (_, call) = super::parse_jsonrpc_client_to_server(
+            r#"{"jsonrpc":"2.0","id":1,"method":"net_version","params":[]}"#,
+        )
+        .unwrap();
+        assert!(matches!(call, super::MethodCall::net_version {}));
+    }
+
+    #[test]
+    fn parse_web3_client_version() {
+        let (_, call) = super::parse_jsonrpc_client_to_server(
+            r#"{"jsonrpc":"2.0","id":1,"method":"web3_clientVersion","params":[]}"#,
+        )
+        .unwrap();
+        assert!(matches!(call, super::MethodCall::web3_clientVersion {}));
+    }
+
+    // Response serialization tests
+
+    #[test]
+    fn response_eth_chain_id_hydration() {
+        // Verify response format for Hydration chain ID
+        let response = super::Response::eth_chainId(super::EthQuantity::from_u64(222222));
+        let json = response.to_json_response("1");
+        assert!(json.contains(r#""0x3640e""#));
+    }
+
+    #[test]
+    fn response_eth_block_number() {
+        let response = super::Response::eth_blockNumber(super::EthQuantity::from_u64(12345));
+        let json = response.to_json_response("1");
+        assert!(json.contains(r#""0x3039""#));
+    }
+
+    #[test]
+    fn response_eth_get_balance_zero() {
+        let response =
+            super::Response::eth_getBalance(super::EthQuantity::from_le_bytes([0u8; 32]));
+        let json = response.to_json_response("1");
+        assert!(json.contains(r#""0x0""#));
+    }
+
+    #[test]
+    fn response_net_version_hydration() {
+        use alloc::borrow::Cow;
+        let response = super::Response::net_version(Cow::Borrowed("222222"));
+        let json = response.to_json_response("1");
+        assert!(json.contains(r#""222222""#));
+    }
+
+    #[test]
+    fn response_web3_client_version() {
+        use alloc::borrow::Cow;
+        let response =
+            super::Response::web3_clientVersion(Cow::Borrowed("smoldot-light/0.19.0"));
+        let json = response.to_json_response("1");
+        assert!(json.contains(r#""smoldot-light/0.19.0""#));
+    }
+
+    #[test]
+    fn response_eth_get_code_empty() {
+        let response = super::Response::eth_getCode(super::HexString(Vec::new()));
+        let json = response.to_json_response("1");
+        // Empty code returns "0x" or ""
+        assert!(json.contains(r#""0x""#) || json.contains(r#""""#));
+    }
+
+    #[test]
+    fn response_eth_gas_price() {
+        // 1 Gwei = 1_000_000_000 = 0x3B9ACA00
+        let mut le = [0u8; 32];
+        le[..8].copy_from_slice(&1_000_000_000u64.to_le_bytes());
+        let response = super::Response::eth_gasPrice(super::EthQuantity::from_le_bytes(le));
+        let json = response.to_json_response("1");
+        assert!(json.contains(r#""0x3b9aca00""#));
+    }
+
+    // MetaMask "add network" flow simulation
+    // MetaMask calls these methods when adding a custom network:
+    // 1. eth_chainId
+    // 2. net_version
+    // 3. eth_blockNumber
+    // 4. eth_getBalance (for the connected account)
+
+    #[test]
+    fn metamask_add_network_flow_parsing() {
+        // Step 1: eth_chainId
+        let (id, _) = super::parse_jsonrpc_client_to_server(
+            r#"{"jsonrpc":"2.0","id":1,"method":"eth_chainId","params":[]}"#,
+        )
+        .unwrap();
+        assert_eq!(id, "1");
+
+        // Step 2: net_version
+        let (id, _) = super::parse_jsonrpc_client_to_server(
+            r#"{"jsonrpc":"2.0","id":2,"method":"net_version","params":[]}"#,
+        )
+        .unwrap();
+        assert_eq!(id, "2");
+
+        // Step 3: eth_blockNumber
+        let (id, _) = super::parse_jsonrpc_client_to_server(
+            r#"{"jsonrpc":"2.0","id":3,"method":"eth_blockNumber","params":[]}"#,
+        )
+        .unwrap();
+        assert_eq!(id, "3");
+
+        // Step 4: eth_getBalance
+        let (id, call) = super::parse_jsonrpc_client_to_server(
+            r#"{"jsonrpc":"2.0","id":4,"method":"eth_getBalance","params":["0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045","latest"]}"#,
+        )
+        .unwrap();
+        assert_eq!(id, "4");
+        assert!(matches!(call, super::MethodCall::eth_getBalance { .. }));
+    }
+
+    #[test]
+    fn eth_methods_in_rpc_methods_list() {
+        // Verify all eth_* methods appear in the method names list
+        let method_names: Vec<&str> = super::MethodCall::method_names().collect();
+        assert!(method_names.contains(&"eth_blockNumber"));
+        assert!(method_names.contains(&"eth_call"));
+        assert!(method_names.contains(&"eth_chainId"));
+        assert!(method_names.contains(&"eth_estimateGas"));
+        assert!(method_names.contains(&"eth_gasPrice"));
+        assert!(method_names.contains(&"eth_getBalance"));
+        assert!(method_names.contains(&"eth_getCode"));
+        assert!(method_names.contains(&"eth_getStorageAt"));
+        assert!(method_names.contains(&"eth_getTransactionCount"));
+        assert!(method_names.contains(&"net_version"));
+        assert!(method_names.contains(&"web3_clientVersion"));
     }
 }

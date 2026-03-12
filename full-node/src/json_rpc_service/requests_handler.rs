@@ -642,6 +642,46 @@ pub fn spawn_requests_handler(config: Config) {
                         ));
                     }
 
+                    // Ethereum JSON-RPC methods.
+                    // Only immediate-response methods are implemented for the full-node.
+                    // Runtime-call-requiring methods fall through to the catch-all below.
+
+                    methods::MethodCall::eth_blockNumber {} => {
+                        let block_number = match config
+                            .database
+                            .with_database(|db| db.best_block_hash())
+                            .await
+                        {
+                            Ok(hash) => {
+                                match config
+                                    .database
+                                    .with_database(move |db| db.block_scale_encoded_header(&hash))
+                                    .await
+                                {
+                                    Ok(Some(header_bytes)) => {
+                                        smoldot::header::decode(
+                                            &header_bytes,
+                                            config.consensus_service.block_number_bytes(),
+                                        )
+                                        .map(|h| h.number)
+                                        .unwrap_or(0)
+                                    }
+                                    _ => 0,
+                                }
+                            }
+                            Err(_) => 0,
+                        };
+                        request.respond(methods::Response::eth_blockNumber(
+                            methods::EthQuantity::from_u64(block_number),
+                        ));
+                    }
+
+                    methods::MethodCall::web3_clientVersion {} => {
+                        request.respond(methods::Response::web3_clientVersion(
+                            format!("{}/{}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION")).into(),
+                        ));
+                    }
+
                     _ => request.fail(service::ErrorResponse::ServerError(
                         -32000,
                         "Not implemented in smoldot yet",

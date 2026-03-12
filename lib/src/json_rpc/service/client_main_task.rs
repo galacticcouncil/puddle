@@ -446,7 +446,18 @@ impl ClientMainTask {
                 | methods::MethodCall::chainHead_v1_header { .. }
                 | methods::MethodCall::chainHead_v1_stopOperation { .. }
                 | methods::MethodCall::chainHead_v1_storage { .. }
-                | methods::MethodCall::chainHead_v1_unpin { .. } => {
+                | methods::MethodCall::chainHead_v1_unpin { .. }
+                | methods::MethodCall::eth_blockNumber { .. }
+                | methods::MethodCall::eth_call { .. }
+                | methods::MethodCall::eth_chainId { .. }
+                | methods::MethodCall::eth_estimateGas { .. }
+                | methods::MethodCall::eth_gasPrice { .. }
+                | methods::MethodCall::eth_getBalance { .. }
+                | methods::MethodCall::eth_getCode { .. }
+                | methods::MethodCall::eth_getStorageAt { .. }
+                | methods::MethodCall::eth_getTransactionCount { .. }
+                | methods::MethodCall::net_version { .. }
+                | methods::MethodCall::web3_clientVersion { .. } => {
                     // Simple one-request-one-response.
                     return Event::HandleRequest {
                         request_process: RequestProcess {
