@@ -24,7 +24,7 @@ use alloc::vec::Vec;
 pub const API_NAME: &str = "EthereumRuntimeRPCApi";
 
 /// Range of supported API versions.
-pub const API_VERSION_RANGE: core::ops::RangeInclusive<u32> = 1..=5;
+pub const API_VERSION_RANGE: core::ops::RangeInclusive<u32> = 1..=6;
 
 /// Runtime function name for `chain_id`.
 pub const CHAIN_ID_FUNCTION_NAME: &str = "EthereumRuntimeRPCApi_chain_id";
