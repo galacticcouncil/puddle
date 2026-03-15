@@ -73,10 +73,24 @@ process.on("SIGINT", () => {
     client.terminate().then(() => process.exit(0));
 });
 
-// Start the WebSocket server listening on port 9944.
-let wsServer = new WebSocketServer({
-    port: 9944
+import { createServer } from 'node:http';
+
+// HTTP server that handles CORS preflight and upgrades to WebSocket.
+const httpServer = createServer((req, res) => {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', '*');
+    if (req.method === 'OPTIONS') {
+        res.writeHead(204);
+        res.end();
+        return;
+    }
+    res.writeHead(200);
+    res.end('Hydration RPC - use WebSocket');
 });
+httpServer.listen(9944);
+
+let wsServer = new WebSocketServer({ server: httpServer });
 
 console.log('JSON-RPC server now listening on port 9944');
 console.log('Hydration RPC: ws://127.0.0.1:9944');
