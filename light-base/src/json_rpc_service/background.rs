@@ -352,6 +352,7 @@ enum MultiStageRequestTy {
     },
     EthChainId,
     NetVersion,
+    EthGetBlockByNumber,
     EthGetBalance {
         address: [u8; 20],
     },
@@ -403,6 +404,7 @@ enum RuntimeCallRequestInProgress {
     SystemAccountNextIndex,
     EthChainId,
     NetVersion,
+    EthCurrentBlock,
     EthAccountBasicForBalance,
     EthAccountBasicForNonce,
     EthAccountCode,
@@ -878,6 +880,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     | methods::MethodCall::eth_estimateGas { .. }
                     | methods::MethodCall::eth_gasPrice { .. }
                     | methods::MethodCall::eth_getBalance { .. }
+                    | methods::MethodCall::eth_getBlockByNumber { .. }
                     | methods::MethodCall::eth_getCode { .. }
                     | methods::MethodCall::eth_getStorageAt { .. }
                     | methods::MethodCall::eth_getTransactionCount { .. }
@@ -1846,6 +1849,32 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                     request_id_json.to_owned(),
                                     stage,
                                     MultiStageRequestTy::EthGetBalance { address },
+                                ));
+                            }
+                            Err(err_response) => {
+                                let _ = me
+                                    .responses_tx
+                                    .send(parse::build_error_response(
+                                        request_id_json,
+                                        parse::ErrorResponse::ServerError(-32000, &err_response),
+                                        None,
+                                    ))
+                                    .await;
+                            }
+                        }
+                    }
+
+                    methods::MethodCall::eth_getBlockByNumber {
+                        block,
+                        ..
+                    } => {
+                        let stage = eth_block_param_to_stage(Some(block), me.genesis_block_hash);
+                        match stage {
+                            Ok(stage) => {
+                                me.multistage_requests_to_advance.push_back((
+                                    request_id_json.to_owned(),
+                                    stage,
+                                    MultiStageRequestTy::EthGetBlockByNumber,
                                 ));
                             }
                             Err(err_response) => {
@@ -3378,6 +3407,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     | MultiStageRequestTy::SystemAccountNextIndex { .. }
                     | MultiStageRequestTy::EthChainId
                     | MultiStageRequestTy::NetVersion
+                    | MultiStageRequestTy::EthGetBlockByNumber
                     | MultiStageRequestTy::EthGetBalance { .. }
                     | MultiStageRequestTy::EthGetCode { .. }
                     | MultiStageRequestTy::EthGetStorageAt { .. }
@@ -3471,6 +3501,12 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                 Some((json_rpc::ethereum::API_NAME.to_owned(), json_rpc::ethereum::API_VERSION_RANGE)),
                                 json_rpc::ethereum::chain_id_parameters(),
                                 RuntimeCallRequestInProgress::NetVersion,
+                            ),
+                            MultiStageRequestTy::EthGetBlockByNumber => (
+                                json_rpc::ethereum::CURRENT_BLOCK_FUNCTION_NAME.to_owned(),
+                                Some((json_rpc::ethereum::API_NAME.to_owned(), json_rpc::ethereum::API_VERSION_RANGE)),
+                                json_rpc::ethereum::current_block_parameters(),
+                                RuntimeCallRequestInProgress::EthCurrentBlock,
                             ),
                             MultiStageRequestTy::EthGetBalance { address } => (
                                 json_rpc::ethereum::ACCOUNT_BASIC_FUNCTION_NAME.to_owned(),
@@ -3778,6 +3814,82 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                         parse::ErrorResponse::ServerError(
                                             -32000,
                                             &"Failed to decode runtime output".to_string(),
+                                        ),
+                                        None,
+                                    ))
+                                    .await;
+                            }
+                        }
+                    }
+                    (Ok(result), RuntimeCallRequestInProgress::EthCurrentBlock) => {
+                        match json_rpc::ethereum::decode_current_block(&result.output) {
+                            Ok(Some(header)) => {
+                                // Format the header fields as hex for the JSON response.
+                                fn h256(b: &[u8; 32]) -> String { format!("0x{}", hex::encode(b)) }
+                                fn h160(b: &[u8; 20]) -> String { format!("0x{}", hex::encode(b)) }
+                                fn h64(b: &[u8; 8]) -> String { format!("0x{}", hex::encode(b)) }
+                                fn bloom(b: &[u8; 256]) -> String { format!("0x{}", hex::encode(b)) }
+                                fn u256_le(b: &[u8; 32]) -> String {
+                                    let q = methods::EthQuantity::from_le_bytes(*b);
+                                    serde_json::to_string(&q).unwrap().trim_matches('"').to_owned()
+                                }
+
+                                let block_json = serde_json::json!({
+                                    "number": u256_le(&header.number),
+                                    "hash": h256(&header.mix_hash), // best available; real hash needs RLP+keccak
+                                    "parentHash": h256(&header.parent_hash),
+                                    "sha3Uncles": h256(&header.ommers_hash),
+                                    "miner": h160(&header.beneficiary),
+                                    "stateRoot": h256(&header.state_root),
+                                    "transactionsRoot": h256(&header.transactions_root),
+                                    "receiptsRoot": h256(&header.receipts_root),
+                                    "logsBloom": bloom(&header.logs_bloom),
+                                    "difficulty": u256_le(&header.difficulty),
+                                    "totalDifficulty": "0x0",
+                                    "gasLimit": u256_le(&header.gas_limit),
+                                    "gasUsed": u256_le(&header.gas_used),
+                                    "timestamp": format!("0x{:x}", header.timestamp),
+                                    "extraData": format!("0x{}", hex::encode(&header.extra_data)),
+                                    "mixHash": h256(&header.mix_hash),
+                                    "nonce": h64(&header.nonce),
+                                    "size": "0x0",
+                                    "uncles": [],
+                                    "transactions": [],
+                                });
+                                let raw = serde_json::value::RawValue::from_string(
+                                    block_json.to_string(),
+                                )
+                                .unwrap();
+                                let _ = me
+                                    .responses_tx
+                                    .send(
+                                        methods::Response::eth_getBlockByNumber(raw)
+                                            .to_json_response(&request_id_json),
+                                    )
+                                    .await;
+                            }
+                            Ok(None) => {
+                                // Block not available – return JSON null.
+                                let raw = serde_json::value::RawValue::from_string(
+                                    "null".to_owned(),
+                                )
+                                .unwrap();
+                                let _ = me
+                                    .responses_tx
+                                    .send(
+                                        methods::Response::eth_getBlockByNumber(raw)
+                                            .to_json_response(&request_id_json),
+                                    )
+                                    .await;
+                            }
+                            Err(error) => {
+                                let _ = me
+                                    .responses_tx
+                                    .send(parse::build_error_response(
+                                        &request_id_json,
+                                        parse::ErrorResponse::ServerError(
+                                            -32000,
+                                            &format!("Failed to decode current_block: {error}"),
                                         ),
                                         None,
                                     ))

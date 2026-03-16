@@ -453,6 +453,7 @@ impl ClientMainTask {
                 | methods::MethodCall::eth_estimateGas { .. }
                 | methods::MethodCall::eth_gasPrice { .. }
                 | methods::MethodCall::eth_getBalance { .. }
+                | methods::MethodCall::eth_getBlockByNumber { .. }
                 | methods::MethodCall::eth_getCode { .. }
                 | methods::MethodCall::eth_getStorageAt { .. }
                 | methods::MethodCall::eth_getTransactionCount { .. }

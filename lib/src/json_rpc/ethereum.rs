@@ -44,6 +44,9 @@ pub const CALL_FUNCTION_NAME: &str = "EthereumRuntimeRPCApi_call";
 /// Runtime function name for `gas_price`.
 pub const GAS_PRICE_FUNCTION_NAME: &str = "EthereumRuntimeRPCApi_gas_price";
 
+/// Runtime function name for `current_block`.
+pub const CURRENT_BLOCK_FUNCTION_NAME: &str = "EthereumRuntimeRPCApi_current_block";
+
 /// Produces the input to pass to the `EthereumRuntimeRPCApi_chain_id` runtime call.
 pub fn chain_id_parameters() -> Vec<u8> {
     Vec::new()
@@ -51,6 +54,11 @@ pub fn chain_id_parameters() -> Vec<u8> {
 
 /// Produces the input to pass to the `EthereumRuntimeRPCApi_gas_price` runtime call.
 pub fn gas_price_parameters() -> Vec<u8> {
+    Vec::new()
+}
+
+/// Produces the input to pass to the `EthereumRuntimeRPCApi_current_block` runtime call.
+pub fn current_block_parameters() -> Vec<u8> {
     Vec::new()
 }
 
@@ -189,6 +197,44 @@ pub struct CallResult {
     pub used_gas: [u8; 32],
 }
 
+/// Decoded Ethereum block header from the Frontier `current_block` runtime API.
+///
+/// All hash/address fields are stored as raw bytes (not reversed).
+/// U256 fields are in little-endian.
+#[derive(Debug, Clone)]
+pub struct EthBlockHeader {
+    /// Parent block hash.
+    pub parent_hash: [u8; 32],
+    /// Ommers/uncles hash.
+    pub ommers_hash: [u8; 32],
+    /// Beneficiary (miner) address.
+    pub beneficiary: [u8; 20],
+    /// State root.
+    pub state_root: [u8; 32],
+    /// Transactions trie root.
+    pub transactions_root: [u8; 32],
+    /// Receipts trie root.
+    pub receipts_root: [u8; 32],
+    /// Bloom filter (256 bytes).
+    pub logs_bloom: [u8; 256],
+    /// Difficulty as U256 in little-endian.
+    pub difficulty: [u8; 32],
+    /// Block number as U256 in little-endian.
+    pub number: [u8; 32],
+    /// Gas limit as U256 in little-endian.
+    pub gas_limit: [u8; 32],
+    /// Gas used as U256 in little-endian.
+    pub gas_used: [u8; 32],
+    /// Timestamp (seconds since epoch).
+    pub timestamp: u64,
+    /// Extra data.
+    pub extra_data: Vec<u8>,
+    /// Mix hash.
+    pub mix_hash: [u8; 32],
+    /// Nonce (8 bytes).
+    pub nonce: [u8; 8],
+}
+
 /// Potential error when decoding Ethereum runtime API output.
 #[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum DecodeError {
@@ -263,6 +309,136 @@ pub fn decode_gas_price(scale_encoded: &[u8]) -> Result<[u8; 32], DecodeError> {
     let mut out = [0u8; 32];
     out.copy_from_slice(scale_encoded);
     Ok(out)
+}
+
+/// Attempt to decode the output of `EthereumRuntimeRPCApi_current_block`.
+///
+/// The return type is `Option<ethereum::Block>`. SCALE encoding:
+/// - `0x00` = None (no block available)
+/// - `0x01` = Some(Block) where Block = Header + Vec<Header> (ommers) + Vec<Transaction>
+///
+/// We decode only the header; transactions are skipped for now.
+pub fn decode_current_block(scale_encoded: &[u8]) -> Result<Option<EthBlockHeader>, DecodeError> {
+    if scale_encoded.is_empty() {
+        return Err(DecodeError::ParseError);
+    }
+    match scale_encoded[0] {
+        0x00 => Ok(None),
+        0x01 => {
+            let data = &scale_encoded[1..];
+            let header = decode_eth_block_header(data)?;
+            Ok(Some(header))
+        }
+        _ => Err(DecodeError::ParseError),
+    }
+}
+
+/// Decode a SCALE-encoded Ethereum block header.
+///
+/// Layout (sequential fields):
+///   parent_hash: H256 (32), ommers_hash: H256 (32), beneficiary: H160 (20),
+///   state_root: H256 (32), transactions_root: H256 (32), receipts_root: H256 (32),
+///   logs_bloom: Bloom (256), difficulty: U256 (32), number: U256 (32),
+///   gas_limit: U256 (32), gas_used: U256 (32), timestamp: u64 (8),
+///   extra_data: Vec<u8> (compact len + bytes), mix_hash: H256 (32), nonce: H64 (8)
+fn decode_eth_block_header(data: &[u8]) -> Result<EthBlockHeader, DecodeError> {
+    // Minimum fixed size before extra_data: 32+32+20+32+32+32+256+32+32+32+32+8 = 572
+    // Then: compact len (≥1 byte) + extra_data bytes + mix_hash (32) + nonce (8)
+    if data.len() < 572 + 1 + 32 + 8 {
+        return Err(DecodeError::ParseError);
+    }
+
+    let mut o = 0usize;
+
+    let mut parent_hash = [0u8; 32];
+    parent_hash.copy_from_slice(&data[o..o + 32]);
+    o += 32;
+
+    let mut ommers_hash = [0u8; 32];
+    ommers_hash.copy_from_slice(&data[o..o + 32]);
+    o += 32;
+
+    let mut beneficiary = [0u8; 20];
+    beneficiary.copy_from_slice(&data[o..o + 20]);
+    o += 20;
+
+    let mut state_root = [0u8; 32];
+    state_root.copy_from_slice(&data[o..o + 32]);
+    o += 32;
+
+    let mut transactions_root = [0u8; 32];
+    transactions_root.copy_from_slice(&data[o..o + 32]);
+    o += 32;
+
+    let mut receipts_root = [0u8; 32];
+    receipts_root.copy_from_slice(&data[o..o + 32]);
+    o += 32;
+
+    let mut logs_bloom = [0u8; 256];
+    logs_bloom.copy_from_slice(&data[o..o + 256]);
+    o += 256;
+
+    let mut difficulty = [0u8; 32];
+    difficulty.copy_from_slice(&data[o..o + 32]);
+    o += 32;
+
+    let mut number = [0u8; 32];
+    number.copy_from_slice(&data[o..o + 32]);
+    o += 32;
+
+    let mut gas_limit = [0u8; 32];
+    gas_limit.copy_from_slice(&data[o..o + 32]);
+    o += 32;
+
+    let mut gas_used = [0u8; 32];
+    gas_used.copy_from_slice(&data[o..o + 32]);
+    o += 32;
+
+    if data.len() < o + 8 {
+        return Err(DecodeError::ParseError);
+    }
+    let timestamp = u64::from_le_bytes(<[u8; 8]>::try_from(&data[o..o + 8]).unwrap());
+    o += 8;
+
+    // extra_data: SCALE Vec<u8> with compact length prefix.
+    let (extra_len, compact_size) = match nom::Parser::parse(
+        &mut crate::util::nom_scale_compact_usize::<nom::error::Error<&[u8]>>,
+        &data[o..],
+    ) {
+        Ok((remaining, len)) => (len, data.len() - o - remaining.len()),
+        Err(_) => return Err(DecodeError::ParseError),
+    };
+    o += compact_size;
+    if data.len() < o + extra_len + 32 + 8 {
+        return Err(DecodeError::ParseError);
+    }
+    let extra_data = data[o..o + extra_len].to_vec();
+    o += extra_len;
+
+    let mut mix_hash = [0u8; 32];
+    mix_hash.copy_from_slice(&data[o..o + 32]);
+    o += 32;
+
+    let mut nonce = [0u8; 8];
+    nonce.copy_from_slice(&data[o..o + 8]);
+
+    Ok(EthBlockHeader {
+        parent_hash,
+        ommers_hash,
+        beneficiary,
+        state_root,
+        transactions_root,
+        receipts_root,
+        logs_bloom,
+        difficulty,
+        number,
+        gas_limit,
+        gas_used,
+        timestamp,
+        extra_data,
+        mix_hash,
+        nonce,
+    })
 }
 
 /// Attempt to decode the output of `EthereumRuntimeRPCApi_call`.
@@ -673,6 +849,115 @@ mod tests {
         let gwei = 1_000_000_000u64.to_le_bytes();
         price[..8].copy_from_slice(&gwei);
         assert_eq!(decode_gas_price(&price).unwrap(), price);
+    }
+
+    #[test]
+    fn decode_current_block_none() {
+        // Option::None
+        assert!(decode_current_block(&[0x00]).unwrap().is_none());
+    }
+
+    #[test]
+    fn decode_current_block_too_short() {
+        assert!(decode_current_block(&[0x01]).is_err());
+    }
+
+    #[test]
+    fn hydration_current_block_roundtrip() {
+        // Build a minimal SCALE-encoded Option<Block> with Some(header).
+        let mut encoded = Vec::new();
+        encoded.push(0x01); // Some
+
+        // Header fields:
+        let parent_hash = [0xAAu8; 32];
+        let ommers_hash = [0xBBu8; 32];
+        let beneficiary = [0xCCu8; 20];
+        let state_root = [0xDDu8; 32];
+        let transactions_root = [0xEEu8; 32];
+        let receipts_root = [0xFFu8; 32];
+        let logs_bloom = [0x11u8; 256];
+        let mut difficulty = [0u8; 32];
+        difficulty[0] = 1; // difficulty = 1 LE
+        let mut number = [0u8; 32];
+        // block number 11747398 = 0xB33C46, LE: [0x46, 0x3C, 0xB3, 0, ...]
+        number[0] = 0x46;
+        number[1] = 0x3C;
+        number[2] = 0xB3;
+        let mut gas_limit = [0u8; 32];
+        gas_limit[..8].copy_from_slice(&15_000_000u64.to_le_bytes());
+        let mut gas_used = [0u8; 32];
+        gas_used[..8].copy_from_slice(&1_234_567u64.to_le_bytes());
+        let timestamp: u64 = 1710000000;
+        let extra_data = b"hydration";
+        let mix_hash = [0x22u8; 32];
+        let nonce = [0x33u8; 8];
+
+        encoded.extend_from_slice(&parent_hash);
+        encoded.extend_from_slice(&ommers_hash);
+        encoded.extend_from_slice(&beneficiary);
+        encoded.extend_from_slice(&state_root);
+        encoded.extend_from_slice(&transactions_root);
+        encoded.extend_from_slice(&receipts_root);
+        encoded.extend_from_slice(&logs_bloom);
+        encoded.extend_from_slice(&difficulty);
+        encoded.extend_from_slice(&number);
+        encoded.extend_from_slice(&gas_limit);
+        encoded.extend_from_slice(&gas_used);
+        encoded.extend_from_slice(&timestamp.to_le_bytes());
+        // extra_data: SCALE compact len (9 bytes = 9 << 2 = 36 = 0x24)
+        encode_scale_compact_len(&mut encoded, extra_data.len());
+        encoded.extend_from_slice(extra_data);
+        encoded.extend_from_slice(&mix_hash);
+        encoded.extend_from_slice(&nonce);
+
+        let header = decode_current_block(&encoded).unwrap().unwrap();
+
+        assert_eq!(header.parent_hash, parent_hash);
+        assert_eq!(header.ommers_hash, ommers_hash);
+        assert_eq!(header.beneficiary, beneficiary);
+        assert_eq!(header.state_root, state_root);
+        assert_eq!(header.transactions_root, transactions_root);
+        assert_eq!(header.receipts_root, receipts_root);
+        assert_eq!(header.logs_bloom, logs_bloom);
+        assert_eq!(header.difficulty, difficulty);
+        assert_eq!(header.number, number);
+        assert_eq!(header.gas_limit, gas_limit);
+        assert_eq!(header.gas_used, gas_used);
+        assert_eq!(header.timestamp, timestamp);
+        assert_eq!(header.extra_data, extra_data);
+        assert_eq!(header.mix_hash, mix_hash);
+        assert_eq!(header.nonce, nonce);
+
+        // Verify the block number decodes to the expected value.
+        // 0xB33C46 = 11746374
+        let block_num = u64::from_le_bytes(header.number[..8].try_into().unwrap());
+        assert_eq!(block_num, 11746374);
+    }
+
+    #[test]
+    fn hydration_current_block_empty_extra_data() {
+        // Same as above but with empty extra_data.
+        let mut encoded = Vec::new();
+        encoded.push(0x01); // Some
+        encoded.extend_from_slice(&[0u8; 32]); // parent_hash
+        encoded.extend_from_slice(&[0u8; 32]); // ommers_hash
+        encoded.extend_from_slice(&[0u8; 20]); // beneficiary
+        encoded.extend_from_slice(&[0u8; 32]); // state_root
+        encoded.extend_from_slice(&[0u8; 32]); // transactions_root
+        encoded.extend_from_slice(&[0u8; 32]); // receipts_root
+        encoded.extend_from_slice(&[0u8; 256]); // logs_bloom
+        encoded.extend_from_slice(&[0u8; 32]); // difficulty
+        encoded.extend_from_slice(&[0u8; 32]); // number
+        encoded.extend_from_slice(&[0u8; 32]); // gas_limit
+        encoded.extend_from_slice(&[0u8; 32]); // gas_used
+        encoded.extend_from_slice(&0u64.to_le_bytes()); // timestamp
+        encoded.push(0x00); // extra_data: compact(0)
+        encoded.extend_from_slice(&[0u8; 32]); // mix_hash
+        encoded.extend_from_slice(&[0u8; 8]); // nonce
+
+        let header = decode_current_block(&encoded).unwrap().unwrap();
+        assert!(header.extra_data.is_empty());
+        assert_eq!(header.timestamp, 0);
     }
 
     #[test]

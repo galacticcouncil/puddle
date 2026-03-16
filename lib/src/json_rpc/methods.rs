@@ -469,6 +469,7 @@ define_methods! {
     eth_estimateGas(transaction: EthCallObject, block: Option<EthBlockParameter>) -> EthQuantity,
     eth_gasPrice() -> EthQuantity,
     eth_getBalance(address: EthAddress, block: Option<EthBlockParameter>) -> EthQuantity,
+    eth_getBlockByNumber(block: EthBlockParameter, full_transactions: bool) -> Box<serde_json::value::RawValue>,
     eth_getCode(address: EthAddress, block: Option<EthBlockParameter>) -> HexString,
     eth_getStorageAt(address: EthAddress, position: EthQuantity, block: Option<EthBlockParameter>) -> HexString,
     eth_getTransactionCount(address: EthAddress, block: Option<EthBlockParameter>) -> EthQuantity,
@@ -1820,6 +1821,60 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(call, super::MethodCall::eth_gasPrice {}));
+    }
+
+    #[test]
+    fn parse_eth_get_block_by_number_latest() {
+        let (_, call) = super::parse_jsonrpc_client_to_server(
+            r#"{"id":1,"jsonrpc":"2.0","method":"eth_getBlockByNumber","params":["latest",false]}"#,
+        )
+        .unwrap();
+        match call {
+            super::MethodCall::eth_getBlockByNumber {
+                block,
+                full_transactions,
+            } => {
+                assert!(matches!(block, super::EthBlockParameter::Latest));
+                assert!(!full_transactions);
+            }
+            _ => panic!("expected eth_getBlockByNumber"),
+        }
+    }
+
+    #[test]
+    fn parse_eth_get_block_by_number_hex() {
+        let (_, call) = super::parse_jsonrpc_client_to_server(
+            r#"{"id":1,"jsonrpc":"2.0","method":"eth_getBlockByNumber","params":["0xb33c46",true]}"#,
+        )
+        .unwrap();
+        match call {
+            super::MethodCall::eth_getBlockByNumber {
+                block,
+                full_transactions,
+            } => {
+                assert!(matches!(block, super::EthBlockParameter::Number(11746374)));
+                assert!(full_transactions);
+            }
+            _ => panic!("expected eth_getBlockByNumber"),
+        }
+    }
+
+    #[test]
+    fn parse_eth_get_block_by_number_earliest() {
+        let (_, call) = super::parse_jsonrpc_client_to_server(
+            r#"{"id":1,"jsonrpc":"2.0","method":"eth_getBlockByNumber","params":["earliest",false]}"#,
+        )
+        .unwrap();
+        match call {
+            super::MethodCall::eth_getBlockByNumber {
+                block,
+                full_transactions,
+            } => {
+                assert!(matches!(block, super::EthBlockParameter::Earliest));
+                assert!(!full_transactions);
+            }
+            _ => panic!("expected eth_getBlockByNumber"),
+        }
     }
 
     #[test]

@@ -23,6 +23,7 @@ import { WebSocketServer } from 'ws';
 import process from 'node:process';
 import * as fs from 'node:fs';
 import { Worker } from 'node:worker_threads';
+import { createServer } from 'node:http';
 
 // Hydration parachain and its Polkadot relay chain.
 const relayChainSpec = fs.readFileSync('../../demo-chain-specs/polkadot.json', 'utf8');
@@ -72,8 +73,6 @@ process.on("SIGINT", () => {
     relay.remove();
     client.terminate().then(() => process.exit(0));
 });
-
-import { createServer } from 'node:http';
 
 // HTTP server that handles CORS preflight and upgrades to WebSocket.
 const httpServer = createServer((req, res) => {
