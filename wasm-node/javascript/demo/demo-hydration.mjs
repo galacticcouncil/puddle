@@ -74,25 +74,50 @@ process.on("SIGINT", () => {
     client.terminate().then(() => process.exit(0));
 });
 
-// HTTP server that handles CORS preflight and upgrades to WebSocket.
-const httpServer = createServer((req, res) => {
+// HTTP server that handles CORS preflight, HTTP JSON-RPC, and upgrades to WebSocket.
+const httpServer = createServer(async (req, res) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', '*');
     if (req.method === 'OPTIONS') {
         res.writeHead(204);
         res.end();
         return;
     }
+    if (req.method === 'POST') {
+        const chunks = [];
+        for await (const chunk of req) chunks.push(chunk);
+        const body = Buffer.concat(chunks).toString('utf8');
+        let chain;
+        try {
+            chain = await client.addChain({
+                chainSpec: paraChainSpec,
+                potentialRelayChains: [relay],
+            });
+            chain.sendJsonRpc(body);
+            const response = (await chain.jsonRpcResponses[Symbol.asyncIterator]().next()).value;
+            res.setHeader('Content-Type', 'application/json');
+            res.writeHead(200);
+            res.end(response);
+        } catch (error) {
+            console.error("(demo) HTTP JSON-RPC error: " + error);
+            res.writeHead(500);
+            res.end(JSON.stringify({ jsonrpc: '2.0', error: { code: -32603, message: 'Internal error' }, id: null }));
+        } finally {
+            if (chain) chain.remove();
+        }
+        return;
+    }
     res.writeHead(200);
-    res.end('Hydration RPC - use WebSocket');
+    res.end('Hydration RPC - use WebSocket or POST JSON-RPC');
 });
 httpServer.listen(9944);
 
 let wsServer = new WebSocketServer({ server: httpServer });
 
 console.log('JSON-RPC server now listening on port 9944');
-console.log('Hydration RPC: ws://127.0.0.1:9944');
+console.log('Hydration RPC (WS):   ws://127.0.0.1:9944');
+console.log('Hydration RPC (HTTP): http://127.0.0.1:9944');
 console.log('');
 
 wsServer.on('connection', function (connection, request) {
